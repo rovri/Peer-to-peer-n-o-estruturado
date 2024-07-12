@@ -4,17 +4,17 @@ class Message:
     def __init__(self, message: str, sender: str | None = None):
         self.sender = sender
         parts = message.split()
-        self.origin, self.seqno, self.ttl, self.operation, *self.args = (
+        self.origin, self.seqno, self.ttl, self.operation = (
             parse_address(parts[0]),
             int(parts[1]),
             int(parts[2]),
-            parts[3].upper(),
-            parts[4:]
+            parts[3].upper()
         )
+        self.args = parts[4:]
 
     def __str__(self) -> str:
         msg = f"{address_to_string(self.origin)} {self.seqno} {self.ttl} {self.operation}"
-        return ' '.join([msg] + self.args)
+        return ' '.join([msg] + [str(arg) for arg in self.args])
 
     def create_response(self) -> str:
         return f"{address_to_string(self.origin)} {self.seqno} 1 {self.operation}_OK"
