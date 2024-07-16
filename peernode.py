@@ -130,6 +130,8 @@ class PeerNode:
         if new_message:
             await asyncio.gather(*(self.send_message(neighbour, new_message) for neighbour in self.neighbours if neighbour != new_message.sender))
 
+    
+
     async def process_random_search(self, message: Message):
         new_message = await self.process_search_message(message)
         if new_message:
@@ -148,6 +150,10 @@ class PeerNode:
             await self._handle_depth_search_response(new_message, message)
 
     async def _handle_depth_search_response(self, new_message, message):
+        if self.parent_node is None:
+            print(f"Erro: Nó pai é None. Mensagem: {new_message}")
+            return
+        
         if self.parent_node == self.address and self.active_node == new_message.sender and not self.candidates:
             print(f"BP: Nao foi possivel localizar a chave {message.args[2]}")
         elif self.active_node and self.active_node != new_message.sender:
@@ -155,10 +161,14 @@ class PeerNode:
             await self.send_message(new_message.sender, new_message)
         elif not self.candidates:
             print("BP: nenhum vizinho encontrou a chave, retrocedendo...")
-            await self.send_message(self.parent_node, new_message)
+            if self.parent_node:
+                await self.send_message(self.parent_node, new_message)
+            else:
+                print("Erro: nó pai não definido.")
         else:
             self.active_node = self.candidates.pop()
             await self.send_message(self.active_node, new_message)
+
 
     async def process_val(self, message: Message):
         mode, key, value, hop_count = message.args
@@ -264,10 +274,11 @@ class PeerNode:
             neighbour = random.choice(self.neighbours)
             await self.send_message(neighbour, search_message)
         elif search_type == "BP":
-            self.parent_node = self.address
+            self.parent_node = self.address  # Set parent_node here
             self.candidates = [*self.neighbours]
             self.active_node = self.candidates.pop()
             await self.send_message(self.active_node, search_message)
+
 
     async def display_stats(self):
         print("Estatísticas:")
@@ -294,6 +305,9 @@ class PeerNode:
         await asyncio.gather(*(self.send_message(neighbour, bye_message) for neighbour in self.neighbours))
 
     async def send_message(self, address: tuple[str, int], message: Message) -> bool:
+        if address is None:
+            print("Erro: endereço é None.")
+            return False
         addr, port = address
         print(f"Encaminhando mensagem \"{message}\" para {address_to_string(address)}")
         try:
