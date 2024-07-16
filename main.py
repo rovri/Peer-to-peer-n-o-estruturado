@@ -4,479 +4,451 @@ import socket
 import random
 import sys
 
-def adress_split(address: str) -> tuple[str, int]:
-    addr, port = address.split(':')
-    entries = socket.getaddrinfo(addr, int(port), family=socket.AF_INET)
-    first_entry = entries[0]
-    host, port = first_entry[4][0], first_entry[4][1]
-    return host, port
+def parse_address(addr_string: str) -> tuple[str, int]:
+    host, port = addr_string.split(':')
+    info = socket.getaddrinfo(host, int(port), family=socket.AF_INET)
+    return info[0][4][0], info[0][4][1]
 
-def adress_string(address: tuple[str, int]) -> str:
-    addr, port = address
-    return f"{addr}:{port}"
+def address_to_string(addr: tuple[str, int]) -> str:
+    return f"{addr[0]}:{addr[1]}"
 
-def entry_split(key_val: str) -> tuple[str, str]:
-    return key_val.split()
+def split_key_value(entry: str) -> tuple[str, str]:
+    return entry.split()
 
-async def async_input(prompt: str = "") -> str:
+async def get_async_input(prompt: str = "") -> str:
     return await asyncio.to_thread(input, prompt)
 
-def debug_print(*args, **kwargs):
+def log(*args, **kwargs):
     kwargs.setdefault('file', sys.stderr)
     print(*args, **kwargs)
 
-async def key_prompt():
-    return await async_input("Digite a chave a ser buscada\n")
+async def request_key():
+    return await get_async_input("Enter the key to search for:\n")
 
-class Message:
-    sender: str | None
-    origin: tuple[str, int]
-    seqno: int
-    ttl: int
-    operation: str
-    args: list[str]
-
-    def __init__(self, message: str, sender: str | None = None):
+class Packet:
+    def __init__(self, data: str, sender: str | None = None):
         self.sender = sender
-        [origin, seqno, ttl, operation, *args] = message.split()
-        self.origin = adress_split(origin)
-        self.seqno = int(seqno)
-        self.ttl = int(ttl)
-        self.operation = operation.upper()
-        self.args = args
+        parts = data.split()
+        self.source = parse_address(parts[0])
+        self.sequence = int(parts[1])
+        self.time_to_live = int(parts[2])
+        self.action = parts[3].upper()
+        self.parameters = parts[4:]
 
     def __str__(self) -> str:
-        msg = f"{adress_string(self.origin)} {self.seqno} {self.ttl} {self.operation}"
-        return ' '.join([msg, *self.args])
+        return ' '.join([f"{address_to_string(self.source)} {self.sequence} {self.time_to_live} {self.action}", *self.parameters])
 
-    def reply(self) -> str:
-        return f"{adress_string(self.origin)} {self.seqno} 1 {self.operation}_OK"
+    def generate_response(self) -> str:
+        return f"{address_to_string(self.source)} {self.sequence} 1 {self.action}_OK"
 
-    def tuple_unique(self) -> tuple[str, int, str]:
-        op_key = f"{self.operation}_{self.args[0]}" if self.operation == "SEARCH" else self.operation
-        return adress_string(self.origin), self.seqno, op_key
+    def get_unique_id(self) -> tuple[str, int, str]:
+        action_key = f"{self.action}_{self.parameters[0]}" if self.action == "SEARCH" else self.action
+        return address_to_string(self.source), self.sequence, action_key
 
-    def fw_search(self, new_last_hop_ip: tuple[str, int]) -> 'Message':
-        mode, _, key, hop_count = self.args
-        last_hop_port = new_last_hop_ip[1]
-        hop_count = int(hop_count) + 1
-        return Message(f"{adress_string(self.origin)} {self.seqno} {self.ttl - 1} {self.operation} {mode} {last_hop_port} {key} {hop_count}")
+    def forward_search(self, new_hop: tuple[str, int]) -> 'Packet':
+        mode, _, key, hop_count = self.parameters
+        new_hop_count = int(hop_count) + 1
+        return Packet(f"{address_to_string(self.source)} {self.sequence} {self.time_to_live - 1} {self.action} {mode} {new_hop[1]} {key} {new_hop_count}")
 
-    def discard_msg_ttl(self) -> bool:
-        if self.ttl <= 0:
-            print("TTL igual a zero, descartando mensagem")
+    def should_discard(self) -> bool:
+        if self.time_to_live <= 0:
+            print("Time to live reached zero, discarding packet")
             return True
         return False
 
-class Stats:
-    fl_count: int
-    rw_count: int
-    bp_count: int
-    fl_avg_hops: float
-    fl_avgsqr_hops: float
-    fl_val_count: int
-    rw_avg_hops: float
-    rw_avgsqr_hops: float
-    rw_val_count: int
-    bp_avg_hops: float
-    bp_avgsqr_hops: float
-    bp_val_count: int
-
+class Metrics:
     def __init__(self):
-        self.fl_count = 0
-        self.rw_count = 0
-        self.bp_count = 0
-        self.fl_avg_hops = 0
-        self.fl_avgsqr_hops = 0
-        self.fl_val_count = 0
-        self.rw_avg_hops = 0
-        self.rw_avgsqr_hops = 0
-        self.rw_val_count = 0
-        self.bp_avg_hops = 0
-        self.bp_avgsqr_hops = 0
-        self.bp_val_count = 0
+        self.flood_count = 0
+        self.random_walk_count = 0
+        self.depth_first_count = 0
+        self.flood_hops = 0
+        self.flood_hops_squared = 0
+        self.flood_samples = 0
+        self.random_walk_hops = 0
+        self.random_walk_hops_squared = 0
+        self.random_walk_samples = 0
+        self.depth_first_hops = 0
+        self.depth_first_hops_squared = 0
+        self.depth_first_samples = 0
 
-    def record_value(self, hops: int, avg_hops_attr, avgsqr_hops_attr, val_count_attr):
-        setattr(self, avg_hops_attr, getattr(self, avg_hops_attr) + hops)
-        setattr(self, avgsqr_hops_attr, getattr(self, avgsqr_hops_attr) + hops * hops)
-        setattr(self, val_count_attr, getattr(self, val_count_attr) + 1)
+    def update_stats(self, hops: int, attr_prefix: str):
+        setattr(self, f"{attr_prefix}_hops", getattr(self, f"{attr_prefix}_hops") + hops)
+        setattr(self, f"{attr_prefix}_hops_squared", getattr(self, f"{attr_prefix}_hops_squared") + hops * hops)
+        setattr(self, f"{attr_prefix}_samples", getattr(self, f"{attr_prefix}_samples") + 1)
 
-    def record_fl_value(self, hops: int):
-        self.record_value(hops, 'fl_avg_hops', 'fl_avgsqr_hops', 'fl_val_count')
+    def update_flood_stats(self, hops: int):
+        self.update_stats(hops, 'flood')
 
-    def record_rw_value(self, hops: int):
-        self.record_value(hops, 'rw_avg_hops', 'rw_avgsqr_hops', 'rw_val_count')
+    def update_random_walk_stats(self, hops: int):
+        self.update_stats(hops, 'random_walk')
 
-    def record_bp_value(self, hops: int):
-        self.record_value(hops, 'bp_avg_hops', 'bp_avgsqr_hops', 'bp_val_count')
+    def update_depth_first_stats(self, hops: int):
+        self.update_stats(hops, 'depth_first')
 
-    def calculate_stats(self, val_count, avg_hops, avgsqr_hops) -> str:
-        if val_count == 0:
+    def compute_stats(self, samples, total_hops, total_hops_squared) -> str:
+        if samples == 0:
             return "N/A"
-        avg = avg_hops / val_count
-        avgsqr = avgsqr_hops / val_count
-        variance = avgsqr - avg * avg
-        deviation = variance ** 0.5
-        return f"{avg:.3} (dp {deviation:.3})"
+        mean = total_hops / samples
+        variance = (total_hops_squared / samples) - (mean * mean)
+        std_dev = variance ** 0.5
+        return f"{mean:.3f} (std dev {std_dev:.3f})"
 
-    def fl_stats_calc(self) -> str:
-        return self.calculate_stats(self.fl_val_count, self.fl_avg_hops, self.fl_avgsqr_hops)
+    def get_flood_stats(self) -> str:
+        return self.compute_stats(self.flood_samples, self.flood_hops, self.flood_hops_squared)
 
-    def rw_stats_calc(self) -> str:
-        return self.calculate_stats(self.rw_val_count, self.rw_avg_hops, self.rw_avgsqr_hops)
+    def get_random_walk_stats(self) -> str:
+        return self.compute_stats(self.random_walk_samples, self.random_walk_hops, self.random_walk_hops_squared)
 
-    def bp_stats_calc(self) -> str:
-        return self.calculate_stats(self.bp_val_count, self.bp_avg_hops, self.bp_avgsqr_hops)
+    def get_depth_first_stats(self) -> str:
+        return self.compute_stats(self.depth_first_samples, self.depth_first_hops, self.depth_first_hops_squared)
 
-
-class Node:
-    address: tuple[str, int]
-    neighbours: list[tuple[str, int]]
-    keys: dict[str, str]
-    seqno: int
-    default_ttl: int
-    seen: set[tuple[str, int, str]]
-    stats: Stats
-    # Depth-first search state:
-    parent_node: tuple[str, int] | None
-    candidate_nodes: list[tuple[str, int]]
-    active_node: tuple[str, int] | None
-
-    def __init__(self, address: str, neighbours_file: str = None, keys_file: str = None):
-        self.address = adress_split(address)
-        self.neighbours = []
-        self.keys = {}
-        self.seqno = 1
+class Peer:
+    def __init__(self, address: str, neighbors_file: str = None, keys_file: str = None):
+        self.address = parse_address(address)
+        self.neighbors = []
+        self.data = {}
+        self.sequence = 1
         self.default_ttl = 100
-        self.seen = set()
-        self.stats = Stats()
-        self.parent_node = None
-        self.candidate_nodes = []
-        self.active_node = None
+        self.processed = set()
+        self.metrics = Metrics()
+        self.parent = None
+        self.unexplored = []
+        self.current = None
 
-    def next_seqno(self) -> int:
-        self.seqno += 1
-        return self.seqno - 1
+    def increment_sequence(self) -> int:
+        self.sequence += 1
+        return self.sequence - 1
 
-    async def load_neighbours(self, neighbours_file: str):
-        with open(neighbours_file, 'r') as file:
-            origin = adress_string(self.address)
-            message = Message(f"{origin} {self.next_seqno()} 1 HELLO")
+    async def init_neighbors(self, neighbors_file: str):
+        with open(neighbors_file, 'r') as file:
+            origin = address_to_string(self.address)
+            packet = Packet(f"{origin} {self.increment_sequence()} 1 HELLO")
             for line in file.readlines():
-                address = adress_split(line.strip())
-                print(f"Tentando adicionar vizinho {adress_string(address)}")
-                sent_successfully = await self.send_msg(address, message)
-                if sent_successfully:
-                    print(f"\tAdicionando vizinho na tabela: {adress_string(address)}")
-                    self.neighbours.append(address)
+                neighbor = parse_address(line.strip())
+                print(f"Attempting to add neighbor {address_to_string(neighbor)}")
+                if await self.transmit(neighbor, packet):
+                    print(f"\tAdding neighbor to list: {address_to_string(neighbor)}")
+                    self.neighbors.append(neighbor)
 
-    async def load_keys(self, keys_file: str):
+    async def init_data(self, keys_file: str):
         with open(keys_file, 'r') as file:
             for line in file.readlines():
-                key, value = entry_split(line)
-                print(f"Adicionando par ({key}, {value}) na tabela local")
-                self.keys[key] = value
+                key, value = split_key_value(line)
+                print(f"Adding pair ({key}, {value}) to local data")
+                self.data[key] = value
 
-    def key_found(self, key: str) -> bool:
-        if key in self.keys:
-            print("Chave encontrada!")
+    def has_key(self, key: str) -> bool:
+        if key in self.data:
+            print("Key found!")
             return True
         return False
 
-    def local_key(self, key: str) -> bool:
-        if self.key_found(key):
-            print("Valor na tabela local!")
-            print(f"\tchave: {key} valor: {self.keys[key]}")
+    def get_local_key(self, key: str) -> bool:
+        if self.has_key(key):
+            print("Value in local data!")
+            print(f"\tkey: {key} value: {self.data[key]}")
             return True
         return False
 
-    def delete_candidate(self, candidate: tuple[str, int]):
-        try:
-            self.candidate_nodes.remove(candidate)
-        except ValueError:
-            pass
+    def remove_unexplored(self, node: tuple[str, int]):
+        if node in self.unexplored:
+            self.unexplored.remove(node)
 
-    async def process_client_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    async def handle_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         data = await reader.readline()
         addr: str = writer.get_extra_info("peername")[0]
-        message = Message(data.decode(), addr)
+        packet = Packet(data.decode(), addr)
 
-        print(f"Mensagem recebida: \"{message}\"")
-        asyncio.create_task(self.process_msg(message))
+        print(f"Received packet: \"{packet}\"")
+        asyncio.create_task(self.process_packet(packet))
 
-        writer.write(message.reply().encode())
+        writer.write(packet.generate_response().encode())
         await writer.drain()
 
         writer.close()
         await writer.wait_closed()
 
-    async def process_msg(self, message: Message):
-        match message.operation, *message.args:
-            case ("HELLO",): await self.process_hello(message)
-            case ("SEARCH", "FL", *_): await self.process_flooding_search(message)
-            case ("SEARCH", "RW", *_): await self.process_random_walk_search(message)
-            case ("SEARCH", "BP", *_): await self.process_depth_first_search(message)
-            case ("VAL", *_): await self.process_values(message)
-            case ("BYE",): await self.process_bye(message)
-            case op: debug_print(f"Unknown operation: \"{' '.join(op)}\"")
-
-    async def process_hello(self, message: Message):
-        if message.origin in self.neighbours:
-            print(f"\tVizinho {adress_string(message.origin)} já está na tabela")
+    async def process_packet(self, packet: Packet):
+        if packet.action == "HELLO":
+            await self.handle_hello(packet)
+        elif packet.action == "SEARCH":
+            if packet.parameters[0] == "FL":
+                await self.handle_flood_search(packet)
+            elif packet.parameters[0] == "RW":
+                await self.handle_random_walk_search(packet)
+            elif packet.parameters[0] == "BP":
+                await self.handle_depth_first_search(packet)
+        elif packet.action == "VAL":
+            await self.handle_value_response(packet)
+        elif packet.action == "BYE":
+            await self.handle_bye(packet)
         else:
-            self.neighbours.append(message.origin)
-            print(f"\tAdicionando vizinho na tabela: {adress_string(message.origin)}")
+            log(f"Unknown action: \"{packet.action}\"")
 
-    async def process_flooding_search(self, message: Message):
-        mode, last_hop_port, key, hop_count = message.args
-        last_hop_ip = message.sender, int(last_hop_port)
-        if message.tuple_unique() in self.seen:
-            print("Flooding: Mensagem repetida!")
+    async def handle_hello(self, packet: Packet):
+        if packet.source in self.neighbors:
+            print(f"\tNeighbor {address_to_string(packet.source)} already in list")
+        else:
+            self.neighbors.append(packet.source)
+            print(f"\tAdding neighbor to list: {address_to_string(packet.source)}")
+
+    async def handle_flood_search(self, packet: Packet):
+        _, last_hop_port, key, hop_count = packet.parameters
+        last_hop = packet.sender, int(last_hop_port)
+        if packet.get_unique_id() in self.processed:
+            print("Flooding: Duplicate packet!")
             return
-        self.seen.add(message.tuple_unique())
-        self.stats.fl_count += 1
-        if self.key_found(key):
-            reply = Message(f"{adress_string(self.address)} {self.next_seqno()} 1 VAL {mode} {key} {self.keys[key]} {int(hop_count)}")
-            await self.send_msg(message.origin, reply)
+        self.processed.add(packet.get_unique_id())
+        self.metrics.flood_count += 1
+        if self.has_key(key):
+            reply = Packet(f"{address_to_string(self.address)} {self.increment_sequence()} 1 VAL FL {key} {self.data[key]} {int(hop_count)}")
+            await self.transmit(packet.source, reply)
             return
-        reply = message.fw_search(self.address)
-        if reply.discard_msg_ttl():
+        forward = packet.forward_search(self.address)
+        if forward.should_discard():
             return
-        for neighbour in self.neighbours:
-            if neighbour == last_hop_ip:
+        for neighbor in self.neighbors:
+            if neighbor == last_hop:
                 continue
-            await self.send_msg(neighbour, reply)
+            await self.transmit(neighbor, forward)
 
-    async def process_random_walk_search(self, message: Message):
-        mode, last_hop_port, key, hop_count = message.args
-        last_hop_ip = message.sender, int(last_hop_port)
-        self.seen.add(message.tuple_unique())
-        self.stats.rw_count += 1
-        if self.key_found(key):
-            reply = Message(f"{adress_string(self.address)} {self.next_seqno()} 1 VAL {mode} {key} {self.keys[key]} {int(hop_count)}")
-            await self.send_msg(message.origin, reply)
+    async def handle_random_walk_search(self, packet: Packet):
+        _, last_hop_port, key, hop_count = packet.parameters
+        last_hop = packet.sender, int(last_hop_port)
+        self.processed.add(packet.get_unique_id())
+        self.metrics.random_walk_count += 1
+        if self.has_key(key):
+            reply = Packet(f"{address_to_string(self.address)} {self.increment_sequence()} 1 VAL RW {key} {self.data[key]} {int(hop_count)}")
+            await self.transmit(packet.source, reply)
             return
-        reply = message.fw_search(self.address)
-        if reply.discard_msg_ttl():
+        forward = packet.forward_search(self.address)
+        if forward.should_discard():
             return
-        neighbours = [*self.neighbours]
-        neighbours.remove(last_hop_ip)
-        neighbour = random.choice(neighbours) if neighbours else last_hop_ip
-        await self.send_msg(neighbour, reply)
+        options = [n for n in self.neighbors if n != last_hop]
+        next_hop = random.choice(options) if options else last_hop
+        await self.transmit(next_hop, forward)
 
-    async def process_depth_first_search(self, message: Message):
-        mode, last_hop_port, key, hop_count = message.args
-        last_hop_ip = message.sender, int(last_hop_port)
-        self.stats.bp_count += 1
-        if self.key_found(key):
-            reply = Message(f"{adress_string(self.address)} {self.next_seqno()} 1 VAL {mode} {key} {self.keys[key]} {int(hop_count)}")
-            await self.send_msg(message.origin, reply)
+    async def handle_depth_first_search(self, packet: Packet):
+        _, last_hop_port, key, hop_count = packet.parameters
+        last_hop = packet.sender, int(last_hop_port)
+        self.metrics.depth_first_count += 1
+        if self.has_key(key):
+            reply = Packet(f"{address_to_string(self.address)} {self.increment_sequence()} 1 VAL BP {key} {self.data[key]} {int(hop_count)}")
+            await self.transmit(packet.source, reply)
             return
-        reply = message.fw_search(self.address)
-        if reply.discard_msg_ttl():
+        forward = packet.forward_search(self.address)
+        if forward.should_discard():
             return
-        if message.tuple_unique() not in self.seen:
-            debug_print(f"\033[33mMensagem {message.tuple_unique()} ainda vista\033[m")
-            self.parent_node = last_hop_ip
-            self.candidate_nodes = [*self.neighbours]
-            self.active_node = None
-        self.delete_candidate(last_hop_ip)
-        self.seen.add(message.tuple_unique())
-        if self.parent_node == self.address and self.active_node == last_hop_ip and not self.candidate_nodes:
-            print(f"BP: Nao foi possivel localizar a chave {key}")
+        if packet.get_unique_id() not in self.processed:
+            log(f"\033[33mPacket {packet.get_unique_id()} not yet processed\033[m")
+            self.parent = last_hop
+            self.unexplored = [*self.neighbors]
+            self.current = None
+        self.remove_unexplored(last_hop)
+        self.processed.add(packet.get_unique_id())
+        if self.parent == self.address and self.current == last_hop and not self.unexplored:
+            print(f"BP: Unable to locate key {key}")
             return
-        if self.active_node is not None and self.active_node != last_hop_ip:
-            print("BP: ciclo detectado, devolvendo a mensagem...")
-            await self.send_msg(last_hop_ip, reply)
-        elif not self.candidate_nodes:
-            print("BP: nenhum vizinho encontrou a chave, retrocedendo...")
-            await self.send_msg(self.parent_node, reply)
+        if self.current is not None and self.current != last_hop:
+            print("BP: cycle detected, returning message...")
+            await self.transmit(last_hop, forward)
+        elif not self.unexplored:
+            print("BP: no neighbor found the key, backtracking...")
+            await self.transmit(self.parent, forward)
         else:
-            self.active_node = self.candidate_nodes.pop()
-            await self.send_msg(self.active_node, reply)
+            self.current = self.unexplored.pop()
+            await self.transmit(self.current, forward)
 
-    async def process_values(self, message: Message):
-        mode, key, value, hop_count = message.args
-        print("\tValor encontrado!")
-        print(f"\t\tChave: {key} valor: {value}")
-        match mode:
-            case "FL": self.stats.record_fl_value(int(hop_count))
-            case "RW": self.stats.record_rw_value(int(hop_count))
-            case "BP": self.stats.record_bp_value(int(hop_count))
+    async def handle_value_response(self, packet: Packet):
+        mode, key, value, hop_count = packet.parameters
+        print("\tValue found!")
+        print(f"\t\tKey: {key} value: {value}")
+        if mode == "FL":
+            self.metrics.update_flood_stats(int(hop_count))
+        elif mode == "RW":
+            self.metrics.update_random_walk_stats(int(hop_count))
+        elif mode == "BP":
+            self.metrics.update_depth_first_stats(int(hop_count))
 
-    async def process_bye(self, message: Message):
-        try:
-            self.neighbours.remove(message.origin)
-            print(f"\tRemovendo vizinho da tabela: {adress_string(message.origin)}")
-        except ValueError:
-            pass
+    async def handle_bye(self, packet: Packet):
+        if packet.source in self.neighbors:
+            self.neighbors.remove(packet.source)
+            print(f"\tRemoving neighbor from list: {address_to_string(packet.source)}")
 
-    async def initiate_server(self):
+    async def start_server(self):
         addr, port = self.address
-        server = await asyncio.start_server(self.process_client_connection, addr, port)
+        server = await asyncio.start_server(self.handle_connection, addr, port)
         async with server:
             await server.serve_forever()
 
-    async def display_menu(self):
+    async def show_menu(self):
         while True:
             print(
                 "\n"
-                "Escolha o comando\n"
-                "\t[0] Listar vizinhos\n"
+                "Choose an option:\n"
+                "\t[0] List neighbors\n"
                 "\t[1] HELLO\n"
                 "\t[2] SEARCH (flooding)\n"
                 "\t[3] SEARCH (random walk)\n"
-                "\t[4] SEARCH (busca em profundidade)\n"
-                "\t[5] Estatisticas\n"
-                "\t[6] Alterar valor padrao de TTL\n"
-                "\t[9] Sair"
+                "\t[4] SEARCH (depth-first)\n"
+                "\t[5] Statistics\n"
+                "\t[6] Change default TTL\n"
+                "\t[9] Exit"
             )
-            option = (await async_input()).strip()
-            match option:
-                case '0': await self.list_of_neighbours()
-                case '1': await self.send_hello()
-                case '2': await self.new_flooding_search()
-                case '3': await self.new_random_walk_search()
-                case '4': await self.new_depth_first_search()
-                case '5': await self.show_statistics()
-                case '6': await self.change_default_ttl()
-                case '9': break
-                case _: debug_print("Erro! Opção inválida")
+            choice = (await get_async_input()).strip()
+            if choice == '0':
+                await self.show_neighbors()
+            elif choice == '1':
+                await self.send_hello()
+            elif choice == '2':
+                await self.start_flood_search()
+            elif choice == '3':
+                await self.start_random_walk_search()
+            elif choice == '4':
+                await self.start_depth_first_search()
+            elif choice == '5':
+                await self.display_stats()
+            elif choice == '6':
+                await self.set_default_ttl()
+            elif choice == '9':
+                break
+            else:
+                log("Error! Invalid option")
         await self.send_bye()
 
-    async def list_of_neighbours(self):
-        print(f"\nHá {len(self.neighbours)} vizinhos na tabela:")
-        for index, neighbour in enumerate(self.neighbours):
-            print(f"\t[{index}] {adress_string(neighbour)}")
+    async def show_neighbors(self):
+        print(f"\nThere are {len(self.neighbors)} neighbors:")
+        for i, neighbor in enumerate(self.neighbors):
+            print(f"\t[{i}] {address_to_string(neighbor)}")
 
     async def send_hello(self):
-        if not self.neighbours:
-            debug_print("Erro! Não há vizinhos")
+        if not self.neighbors:
+            log("Error! No neighbors")
             return
-        print("\nEscolha o vizinho:")
-        await self.list_of_neighbours()
-        neighbour = int(await async_input())
-        if neighbour < 0 or neighbour >= len(self.neighbours):
-            debug_print("Erro! Vizinho inválido")
+        print("\nChoose a neighbor:")
+        await self.show_neighbors()
+        choice = int(await get_async_input())
+        if choice < 0 or choice >= len(self.neighbors):
+            log("Error! Invalid neighbor")
             return
-        address = self.neighbours[neighbour]
-        origin = adress_string(self.address)
-        message = Message(f"{origin} {self.next_seqno()} 1 HELLO")
-        await self.send_msg(address, message)
+        target = self.neighbors[choice]
+        origin = address_to_string(self.address)
+        packet = Packet(f"{origin} {self.increment_sequence()} 1 HELLO")
+        await self.transmit(target, packet)
 
-    async def new_flooding_search(self):
-        key = await key_prompt()
-        if self.local_key(key):
+    async def start_flood_search(self):
+        key = await request_key()
+        if self.get_local_key(key):
             return
-        origin = adress_string(self.address)
+        origin = address_to_string(self.address)
         port = self.address[1]
-        message = Message(f"{origin} {self.next_seqno()} {self.default_ttl} SEARCH FL {port} {key} 1")
-        self.seen.add(message.tuple_unique())
-        for neighbour in self.neighbours:
-            await self.send_msg(neighbour, message)
+        packet = Packet(f"{origin} {self.increment_sequence()} {self.default_ttl} SEARCH FL {port} {key} 1")
+        self.processed.add(packet.get_unique_id())
+        for neighbor in self.neighbors:
+            await self.transmit(neighbor, packet)
 
-    async def new_random_walk_search(self):
-        key = await key_prompt()
-        if self.local_key(key):
+    async def start_random_walk_search(self):
+        key = await request_key()
+        if self.get_local_key(key):
             return
-        origin = adress_string(self.address)
+        origin = address_to_string(self.address)
         port = self.address[1]
-        message = Message(f"{origin} {self.next_seqno()} {self.default_ttl} SEARCH RW {port} {key} 1")
-        self.seen.add(message.tuple_unique())
-        neighbour = random.choice(self.neighbours)
-        await self.send_msg(neighbour, message)
+        packet = Packet(f"{origin} {self.increment_sequence()} {self.default_ttl} SEARCH RW {port} {key} 1")
+        self.processed.add(packet.get_unique_id())
+        neighbor = random.choice(self.neighbors)
+        await self.transmit(neighbor, packet)
 
-    async def new_depth_first_search(self):
-        key = await key_prompt()
-        if self.local_key(key):
+    async def start_depth_first_search(self):
+        key = await request_key()
+        if self.get_local_key(key):
             return
-        origin = adress_string(self.address)
+        origin = address_to_string(self.address)
         port = self.address[1]
-        message = Message(f"{origin} {self.next_seqno()} {self.default_ttl} SEARCH BP {port} {key} 1")
-        self.seen.add(message.tuple_unique())
-        self.parent_node = self.address
-        self.candidate_nodes = [*self.neighbours]
-        self.active_node = self.candidate_nodes.pop()
-        await self.send_msg(self.active_node, message)
+        packet = Packet(f"{origin} {self.increment_sequence()} {self.default_ttl} SEARCH BP {port} {key} 1")
+        self.processed.add(packet.get_unique_id())
+        self.parent = self.address
+        self.unexplored = [*self.neighbors]
+        self.current = self.unexplored.pop()
+        await self.transmit(self.current, packet)
 
-    async def show_statistics(self):
-        print("Estatísticas:") 
-        print(f"\tTotal de mensagens de flooding vistas: {self.stats.fl_count}")
-        print(f"\tTotal de mensagens de random walk vistas: {self.stats.rw_count}")
-        print(f"\tTotal de mensagens de busca em profundidade vistas: {self.stats.bp_count}")
-        print(f"\tMédia de saltos até encontrar destino por flooding: {self.stats.fl_stats_calc()}")
-        print(f"\tMédia de saltos até encontrar destino por random walk: {self.stats.rw_stats_calc()}")
-        print(f"\tMédia de saltos até encontrar destino por busca em profundidade: {self.stats.bp_stats_calc()}")
+    async def display_stats(self):
+        print("Statistics:") 
+        print(f"\tTotal flood messages seen: {self.metrics.flood_count}")
+        print(f"\tTotal random walk messages seen: {self.metrics.random_walk_count}")
+        print(f"\tTotal depth-first messages seen: {self.metrics.depth_first_count}")
+        print(f"\tAverage hops to find destination by flooding: {self.metrics.get_flood_stats()}")
+        print(f"\tAverage hops to find destination by random walk: {self.metrics.get_random_walk_stats()}")
+        print(f"\tAverage hops to find destination by depth-first: {self.metrics.get_depth_first_stats()}")
 
-    async def change_default_ttl(self):
-        self.default_ttl = int(await async_input("\nDigite novo valor de TTL\n"))
+    async def set_default_ttl(self):
+        self.default_ttl = int(await get_async_input("\nEnter new TTL value\n"))
         if self.default_ttl < 1:
-            debug_print("Erro! TTL deve ser maior que 0")
+            log("Error! TTL must be greater than 0")
 
     async def send_bye(self):
-        origin = adress_string(self.address)
-        message = Message(f"{origin} {self.next_seqno()} 1 BYE")
-        for neighbour in self.neighbours:
-            await self.send_msg(neighbour, message)
+        origin = address_to_string(self.address)
+        packet = Packet(f"{origin} {self.increment_sequence()} 1 BYE")
+        for neighbor in self.neighbors:
+            await self.transmit(neighbor, packet)
 
-    async def send_msg(self, address: tuple[str, int], message: Message) -> bool:
+    async def transmit(self, address: tuple[str, int], packet: Packet) -> bool:
         addr, port = address
-        print(f"Encaminhando mensagem \"{message}\" para {adress_string(address)}")
+        print(f"Forwarding packet \"{packet}\" to {address_to_string(address)}")
         try:
             reader, writer = await asyncio.open_connection(addr, port)
-            writer.write(f"{message}\n".encode())
+            writer.write(f"{packet}\n".encode())
             await writer.drain()
 
             data = await reader.read(100)
-            reply = data.decode().strip()
+            response = data.decode().strip()
 
             writer.close()
             await writer.wait_closed()
 
-            reply_msg = Message(reply, addr)
-            if reply_msg.operation == f"{message.operation}_OK":
-                print(f"\tEnvio feito com sucesso: \"{message}\"")
+            response_packet = Packet(response, addr)
+            if response_packet.action == f"{packet.action}_OK":
+                print(f"\tTransmission successful: \"{packet}\"")
                 return True
         except ConnectionRefusedError:
             pass
-        print("\tErro ao conectar!")
+        print("\tConnection error!")
         return False
 
-def parse_args() -> tuple[str, str, str]:
+def get_arguments() -> tuple[str, str, str]:
     parser = ArgumentParser()
     parser.add_argument(
         "address", type=str,
-        help="This node's IP address in the format <addr>:<port>"
+        help="This peer's IP address in the format <addr>:<port>"
     )
     parser.add_argument(
-        "neighbours_file", type=str, nargs='?', default=None,
-        help="Path to the neighbours file (optional)"
+        "neighbors_file", type=str, nargs='?', default=None,
+        help="Path to the neighbors file (optional)"
     )
     parser.add_argument(
         "keys_file", type=str, nargs='?', default=None,
-        help="Path to the neighbours file (optional)"
+        help="Path to the keys file (optional)"
     )
     args = parser.parse_args()
-    return args.address, args.neighbours_file, args.keys_file
+    return args.address, args.neighbors_file, args.keys_file
 
-async def main() -> int:
-    address, neighbours, keys = parse_args()
-    node = Node(address, neighbours, keys)
-    asyncio.create_task(node.initiate_server())
-    print(f"Servidor criado: {adress_string(node.address)}")
+async def run() -> int:
+    address, neighbors, keys = get_arguments()
+    peer = Peer(address, neighbors, keys)
+    asyncio.create_task(peer.start_server())
+    print(f"Server started: {address_to_string(peer.address)}")
 
     print()
 
-    if neighbours:
-        await node.load_neighbours(neighbours)
+    if neighbors:
+        await peer.init_neighbors(neighbors)
 
     print()
 
     if keys:
-        await node.load_keys(keys)
+        await peer.init_data(keys)
 
-    await node.display_menu()
+    await peer.show_menu()
     return 0
 
 if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))
+    sys.exit(asyncio.run(run()))
