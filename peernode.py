@@ -147,23 +147,18 @@ class PeerNode:
             self.remove_candidate(new_message.sender)
             await self._handle_depth_search_response(new_message, message)
 
-async def _handle_depth_search_response(self, new_message, message):
-    if self.parent_node is None:
-        print(f"Erro: Nó pai é None. Mensagem: {new_message}")
-        return
-    
-    if self.parent_node == self.address and self.active_node == new_message.sender and not self.candidates:
-        print(f"BP: Nao foi possivel localizar a chave {message.args[2]}")
-    elif self.active_node and self.active_node != new_message.sender:
-        print("BP: ciclo detectado, devolvendo a mensagem...")
-        await self.send_message(new_message.sender, new_message)
-    elif not self.candidates:
-        print("BP: nenhum vizinho encontrou a chave, retrocedendo...")
-        await self.send_message(self.parent_node, new_message)
-    else:
-        self.active_node = self.candidates.pop()
-        await self.send_message(self.active_node, new_message)
-
+    async def _handle_depth_search_response(self, new_message, message):
+        if self.parent_node == self.address and self.active_node == new_message.sender and not self.candidates:
+            print(f"BP: Nao foi possivel localizar a chave {message.args[2]}")
+        elif self.active_node and self.active_node != new_message.sender:
+            print("BP: ciclo detectado, devolvendo a mensagem...")
+            await self.send_message(new_message.sender, new_message)
+        elif not self.candidates:
+            print("BP: nenhum vizinho encontrou a chave, retrocedendo...")
+            await self.send_message(self.parent_node, new_message)
+        else:
+            self.active_node = self.candidates.pop()
+            await self.send_message(self.active_node, new_message)
 
     async def process_val(self, message: Message):
         mode, key, value, hop_count = message.args
@@ -269,11 +264,10 @@ async def _handle_depth_search_response(self, new_message, message):
             neighbour = random.choice(self.neighbours)
             await self.send_message(neighbour, search_message)
         elif search_type == "BP":
-            self.parent_node = self.address  # Set parent_node here
+            self.parent_node = self.address
             self.candidates = [*self.neighbours]
             self.active_node = self.candidates.pop()
             await self.send_message(self.active_node, search_message)
-
 
     async def display_stats(self):
         print("Estatísticas:")
